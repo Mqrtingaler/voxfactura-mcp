@@ -1,0 +1,71 @@
+# VoxFactura — API publique (pour assistants IA)
+
+> VoxFactura est un outil de facturation piloté à la voix pour artisans. Cette
+> API donne un accès LECTURE (et quelques écritures gated) aux données d'un
+> compte : factures, dépenses, chantiers, clients, comptabilité. Elle sert à
+> répondre en langage naturel à des questions business et à préparer des
+> brouillons. Elle n'envoie jamais rien à un client.
+
+## Base
+
+- Base URL : https://voxfacture-production.up.railway.app
+- Préfixe : /api/v1/pub
+- Auth : header `Authorization: Bearer vf_live_…` (clé API scopée créée par
+  l'artisan dans Réglages → Clés API). Alternative : header `X-API-Key`.
+- Doc OpenAPI : /api/v1/pub/openapi.json — Doc interactive : /api/v1/pub/docs
+- Toutes les données sont isolées au compte de la clé (aucun accès cross-compte).
+
+## Concepts
+
+- Chantier : un projet/affaire. Chaque facture et chaque dépense peut y être
+  rattachée (`chantier_id`), ce qui permet la MARGE par chantier.
+- Facture : document émis au client. Statuts : brouillon, envoyee,
+  payee_partielle, payee, en_retard, annulee.
+- Dépense : facture de frais (matériel, sous-traitance…), avec une catégorie.
+- Devis : proposition ; créable en brouillon via l'API (jamais envoyé auto).
+
+## Permissions (scopes de la clé)
+
+- Lecture : invoices:read, expenses:read, chantiers:read, clients:read,
+  accounting:read
+- Écriture : devis:write, payments:write, expenses:write
+- Une clé ne peut que ce que ses scopes autorisent (403 sinon).
+
+## Endpoints lecture
+
+- GET /invoices?unpaid_only=&statut=&chantier_id=&limit=&offset=
+  -> { data: [factures], count, limit, offset }
+- GET /invoices/{id} -> facture détaillée (avec lignes)
+- GET /expenses?chantier_id=&categorie=&limit=&offset=
+- GET /chantiers?statut=&client_id=&limit=&offset= ; GET /chantiers/{id}
+- GET /clients?search=&limit=&offset=
+
+## Endpoints comptabilité (scope accounting:read)
+
+- GET /accounting/vat-summary?period_start=YYYY-MM-DD&period_end=YYYY-MM-DD
+  -> TVA collectée par taux, déductible, TVA nette.
+- GET /accounting/sales-journal, /accounting/purchase-journal (mêmes dates)
+- GET /accounting/fec?year=YYYY -> Fichier des Écritures Comptables (texte
+  tab-séparé, partie double).
+
+## Endpoints écriture (jamais d'envoi client)
+
+- POST /devis (devis:write) -> crée un devis BROUILLON.
+  Body : { client_id, objet?, chantier_id?, lignes: [ { designation, quantite,
+  prix_unitaire_ht, taux_tva } ] }
+- POST /invoices/{id}/mark-paid (payments:write) -> Body { montant? } (partiel
+  si < total TTC ; vide = solde total).
+- POST /expenses (expenses:write) -> Body { designation, montant_ttc,
+  montant_ht?, montant_tva?, chantier_id?, fournisseur?, categorie? }
+
+## Calculs utiles
+
+- Marge d'un chantier = somme des total_ht des factures du chantier − somme des
+  montant_ht des dépenses du chantier (croiser /invoices?chantier_id et
+  /expenses?chantier_id).
+
+## Bonnes pratiques
+
+- Paginer avec limit/offset jusqu'à recevoir moins de `limit` éléments.
+- Ne jamais supposer qu'une écriture envoie au client : l'envoi est manuel.
+- En cas de 401 : clé invalide/révoquée. En cas de 403 : scope manquant.
