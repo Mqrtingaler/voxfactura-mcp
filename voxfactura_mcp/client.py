@@ -1,7 +1,12 @@
 """Client HTTP de l'API publique VoxFactura (pour le serveur MCP).
 
 Volontairement sans dépendance au reste du package (httpx + stdlib seulement),
-pour être extrait tel quel dans un repo public (Phase 5). Lecture seule.
+pour être extrait tel quel dans un repo public (Phase 5). Lecture, plus des
+écritures gated qui ne font jamais d'envoi client.
+
+Identifiants : l'API publique ne parle qu'en numéros propres au compte (le
+champ `id` de chaque objet et toutes les références `*_id`). Le client les
+transmet tels quels, sans rien supposer d'autre.
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ class VoxFacturaError(Exception):
 
 @dataclass
 class VoxFacturaClient:
-    """Appelle `/api/v1/pub/*` avec une clé API (Bearer). Lecture seule."""
+    """Appelle `/api/v1/pub/*` avec une clé API (Bearer)."""
 
     api_key: str
     base_url: str = DEFAULT_BASE_URL
@@ -56,6 +61,26 @@ class VoxFacturaClient:
         if r.status_code >= 400:
             raise VoxFacturaError(f"{path} -> {r.status_code}: {r.text[:200]}")
         return r.json()
+
+    def _get_text(self, path: str, params: dict[str, Any] | None = None) -> str:
+        """GET d'une réponse texte (export FEC)."""
+        clean = {k: v for k, v in (params or {}).items() if v is not None}
+        try:
+            r = httpx.get(
+                f"{self.base_url}/api/v1/pub{path}",
+                params=clean,
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=_TIMEOUT,
+            )
+        except httpx.HTTPError as e:
+            raise VoxFacturaError(f"appel {path} échoué : {e}") from e
+        if r.status_code == 401:
+            raise VoxFacturaError("Clé API invalide ou révoquée.")
+        if r.status_code == 403:
+            raise VoxFacturaError("Cette clé n'a pas la permission requise pour cette donnée.")
+        if r.status_code >= 400:
+            raise VoxFacturaError(f"{path} -> {r.status_code}: {r.text[:200]}")
+        return r.text
 
     def _post(self, path: str, json_body: dict[str, Any]) -> Any:
         clean = {k: v for k, v in json_body.items() if v is not None}
@@ -107,9 +132,14 @@ class VoxFacturaClient:
         )
         return page.get("data", [])
 
-    def list_chantiers(self, *, statut: str | None = None, limit: int = 50) -> list[dict]:
-        page = self._get("/chantiers", {"statut": statut, "limit": limit})
+    def list_chantiers(
+        self, *, statut: str | None = None, client_id: int | None = None, limit: int = 50
+    ) -> list[dict]:
+        page = self._get("/chantiers", {"statut": statut, "client_id": client_id, "limit": limit})
         return page.get("data", [])
+
+    def get_chantier(self, chantier_id: int) -> dict:
+        return self._get(f"/chantiers/{chantier_id}")
 
     def list_clients(self, *, search: str | None = None, limit: int = 50) -> list[dict]:
         page = self._get("/clients", {"search": search, "limit": limit})
@@ -121,6 +151,22 @@ class VoxFacturaClient:
             {"period_start": period_start, "period_end": period_end},
         )
 
+    def sales_journal(self, *, period_start: str, period_end: str) -> dict:
+        return self._get(
+            "/accounting/sales-journal",
+            {"period_start": period_start, "period_end": period_end},
+        )
+
+    def purchase_journal(self, *, period_start: str, period_end: str) -> dict:
+        return self._get(
+            "/accounting/purchase-journal",
+            {"period_start": period_start, "period_end": period_end},
+        )
+
+    def export_fec(self, *, year: int) -> str:
+        """Fichier des écritures comptables (texte tabulé) de l'année."""
+        return self._get_text("/accounting/fec", {"year": year})
+
     # ── Écritures gated ───────────────────────────────────────────────────────
     def create_devis(
         self,
@@ -129,13 +175,27 @@ class VoxFacturaClient:
         lignes: list[dict],
         objet: str | None = None,
         chantier_id: int | None = None,
+        validite_jours: int | None = None,
+        date_validite: str | None = None,
+        delai_execution: str | None = None,
+        notes: str | None = None,
+        acompte_pct: str | None = None,
     ) -> dict:
         """Crée un devis BROUILLON (jamais envoyé automatiquement). Nécessite le
-        scope devis:write."""
-        return self._post(
-            "/devis",
-            {"client_id": client_id, "objet": objet, "chantier_id": chantier_id, "lignes": lignes},
-        )
+        scope devis:write. `validite_jours` et `date_validite` omis : durée
+        réglée sur le compte. Les champs None ne sont pas envoyés."""
+        corps = {
+            "client_id": client_id,
+            "objet": objet,
+            "chantier_id": chantier_id,
+            "lignes": lignes,
+            "validite_jours": validite_jours,
+            "date_validite": date_validite,
+            "delai_execution": delai_execution,
+            "notes": notes,
+            "acompte_pct": acompte_pct,
+        }
+        return self._post("/devis", corps)
 
     def mark_invoice_paid(self, invoice_id: int, *, montant: str | None = None) -> dict:
         """Marque une facture payée (payments:write). montant None -> solde total."""

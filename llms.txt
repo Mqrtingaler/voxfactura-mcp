@@ -1,4 +1,4 @@
-# VoxFactura — API publique (pour assistants IA)
+# VoxFactura : API publique (pour assistants IA)
 
 > VoxFactura est un outil de facturation piloté à la voix pour artisans. Cette
 > API donne un accès LECTURE (et quelques écritures gated) aux données d'un
@@ -12,7 +12,7 @@
 - Préfixe : /api/v1/pub
 - Auth : header `Authorization: Bearer vf_live_…` (clé API scopée créée par
   l'artisan dans Réglages → Clés API). Alternative : header `X-API-Key`.
-- Doc OpenAPI : /api/v1/pub/openapi.json — Doc interactive : /api/v1/pub/docs
+- Doc OpenAPI : /api/v1/pub/openapi.json ; doc interactive : /api/v1/pub/docs
 - Toutes les données sont isolées au compte de la clé (aucun accès cross-compte).
 
 ## Concepts
@@ -23,6 +23,15 @@
   payee_partielle, payee, en_retard, annulee.
 - Dépense : facture de frais (matériel, sous-traitance…), avec une catégorie.
 - Devis : proposition ; créable en brouillon via l'API (jamais envoyé auto).
+- Numéro (`numero`) : nul tant qu'une facture ou un devis est un brouillon.
+  Le numéro définitif de la série (F-2026-0004, D-..., série de la marque) et
+  la date d'émission sont attribués quand le document est émis (envoi, marqué
+  envoyé ou payé, dépôt électronique, signature). Un brouillon se désigne par
+  son `id` (« Brouillon n°12 »).
+- Identifiants : le champ `id` de chaque objet est le numéro propre au compte
+  (1, 2, 3...). Toutes les références (`client_id`, `chantier_id`, `devis_id`,
+  `facture_origine_id`, `prestation_id`) et les `{id}` des chemins utilisent
+  ces mêmes numéros. Un numéro absent du compte répond 404.
 
 ## Permissions (scopes de la clé)
 
@@ -35,7 +44,9 @@
 
 - GET /invoices?unpaid_only=&statut=&chantier_id=&limit=&offset=
   -> { data: [factures], count, limit, offset }
-- GET /invoices/{id} -> facture détaillée (avec lignes)
+- GET /invoices/{id} -> facture détaillée : lignes (avec leur `nature`, bien
+  ou service), date de prestation, adresse de livraison, bon de commande,
+  `nature_operations` (biens, services ou mixte)
 - GET /expenses?chantier_id=&categorie=&limit=&offset=
 - GET /chantiers?statut=&client_id=&limit=&offset= ; GET /chantiers/{id}
 - GET /clients?search=&limit=&offset=
@@ -51,8 +62,10 @@
 ## Endpoints écriture (jamais d'envoi client)
 
 - POST /devis (devis:write) -> crée un devis BROUILLON.
-  Body : { client_id, objet?, chantier_id?, lignes: [ { designation, quantite,
-  prix_unitaire_ht, taux_tva } ] }
+  Body : { client_id, objet?, chantier_id?, validite_jours? (1 à 365) ou
+  date_validite?, delai_execution?, acompte_pct?, notes?, lignes: [ {
+  designation, quantite, unite?, prix_unitaire_ht, taux_tva, prestation_id?,
+  nature? ("bien" ou "service") } ] }. Sans validité : la durée du compte.
 - POST /invoices/{id}/mark-paid (payments:write) -> Body { montant? } (partiel
   si < total TTC ; vide = solde total).
 - POST /expenses (expenses:write) -> Body { designation, montant_ttc,

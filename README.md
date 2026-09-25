@@ -59,7 +59,7 @@ claude mcp add voxfactura -e VOXFACTURA_API_KEY=vf_live_ta_cle -- voxfactura-mcp
 
 | Variable | Rôle | Défaut |
 |---|---|---|
-| `VOXFACTURA_API_KEY` | Ta clé API (obligatoire) | — |
+| `VOXFACTURA_API_KEY` | Ta clé API (obligatoire) | aucune |
 | `VOXFACTURA_API_BASE_URL` | URL de l'API | `https://voxfacture-production.up.railway.app` |
 
 ## Outils
@@ -70,10 +70,14 @@ claude mcp add voxfactura -e VOXFACTURA_API_KEY=vf_live_ta_cle -- voxfactura-mcp
 | `factures` | Factures (filtres statut / chantier) | factures |
 | `facture` | Détail d'une facture | factures |
 | `depenses` | Dépenses (filtres chantier / catégorie) | dépenses |
-| `chantiers` | Liste des chantiers | chantiers |
+| `chantiers` | Liste des chantiers (filtres statut / client) | chantiers |
+| `chantier` | Détail d'un chantier | chantiers |
 | `clients` | Liste / recherche clients | clients |
 | `marge_chantier` | CA facturé − dépenses d'un chantier | factures + dépenses |
 | `recap_tva` | TVA collectée / déductible / nette | comptabilité |
+| `journal_ventes` | Journal des ventes d'une période | comptabilité |
+| `journal_achats` | Journal des achats d'une période | comptabilité |
+| `export_fec` | Fichier des écritures comptables de l'année | comptabilité |
 | `creer_devis_brouillon` | Crée un devis (brouillon) | devis:write |
 | `marquer_facture_payee` | Marque une facture payée | payments:write |
 | `ajouter_depense` | Ajoute une dépense | expenses:write |
