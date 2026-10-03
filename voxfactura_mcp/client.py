@@ -7,14 +7,19 @@ pour être extrait tel quel dans un repo public (Phase 5). Lecture, plus des
 Identifiants : l'API publique ne parle qu'en numéros propres au compte (le
 champ `id` de chaque objet et toutes les références `*_id`). Le client les
 transmet tels quels, sans rien supposer d'autre.
+
+Clé cabinet (`vf_cab_…`) : chaque requête porte le paramètre `dossier`
+(numéro du dossier client chez le cabinet), pris dans VOXFACTURA_DOSSIER ou
+fixé par `pour_dossier()`. `list_dossiers()` donne la liste.
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -26,12 +31,36 @@ class VoxFacturaError(Exception):
     """Erreur d'appel à l'API publique VoxFactura."""
 
 
+_HOTES_LOCAUX = {"localhost", "127.0.0.1", "::1"}
+
+
+def verifier_base_url(base: str) -> str:
+    """https obligatoire : la clé API part en en-tête à chaque appel. http
+    seulement vers la machine locale (développement)."""
+    propre = (base or "").strip().rstrip("/")
+    parties = urlsplit(propre)
+    hote = (parties.hostname or "").lower()
+    if parties.scheme == "https" and hote:
+        return propre
+    if parties.scheme == "http" and hote in _HOTES_LOCAUX:
+        return propre
+    raise VoxFacturaError(
+        "VOXFACTURA_API_BASE_URL doit commencer par https:// (http seulement vers "
+        "localhost) : la clé API ne doit jamais circuler en clair."
+    )
+
+
 @dataclass
 class VoxFacturaClient:
     """Appelle `/api/v1/pub/*` avec une clé API (Bearer)."""
 
     api_key: str
     base_url: str = DEFAULT_BASE_URL
+    # Clé cabinet : numéro du dossier client lu (paramètre `dossier`).
+    dossier: int | None = None
+
+    def __post_init__(self) -> None:
+        self.base_url = verifier_base_url(self.base_url)
 
     @classmethod
     def from_env(cls) -> VoxFacturaClient:
@@ -41,10 +70,40 @@ class VoxFacturaClient:
                 "VOXFACTURA_API_KEY manquante. Crée une clé dans Réglages -> Clés API."
             )
         base = os.environ.get("VOXFACTURA_API_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
-        return cls(api_key=key, base_url=base)
+        brut = os.environ.get("VOXFACTURA_DOSSIER", "").strip()
+        if brut and not brut.isdigit():
+            raise VoxFacturaError("VOXFACTURA_DOSSIER doit être un numéro de dossier (ex. 3).")
+        return cls(api_key=key, base_url=base, dossier=int(brut) if brut else None)
+
+    def pour_dossier(self, dossier: int) -> VoxFacturaClient:
+        """Même clé, autre dossier (clé cabinet)."""
+        return replace(self, dossier=dossier)
+
+    def _params(self, params: dict[str, Any] | None) -> dict[str, Any]:
+        clean = {k: v for k, v in (params or {}).items() if v is not None}
+        if self.dossier is not None:
+            clean["dossier"] = self.dossier
+        return clean
+
+    @staticmethod
+    def _erreur(path: str, r: httpx.Response, ecriture: bool = False) -> VoxFacturaError:
+        if r.status_code == 401:
+            return VoxFacturaError("Clé API invalide ou révoquée.")
+        if r.status_code == 400 and "dossier" in r.text.lower():
+            return VoxFacturaError(
+                "Clé cabinet : précisez le dossier (paramètre `dossier` ou "
+                "VOXFACTURA_DOSSIER ; liste avec l'outil `dossiers`)."
+            )
+        if r.status_code == 403:
+            if "cabinet" in r.text.lower():
+                return VoxFacturaError(f"{path} -> 403: {r.text[:200]}")
+            if ecriture:
+                return VoxFacturaError("Cette clé n'a pas la permission d'écriture requise.")
+            return VoxFacturaError("Cette clé n'a pas la permission requise pour cette donnée.")
+        return VoxFacturaError(f"{path} -> {r.status_code}: {r.text[:200]}")
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        clean = {k: v for k, v in (params or {}).items() if v is not None}
+        clean = self._params(params)
         try:
             r = httpx.get(
                 f"{self.base_url}/api/v1/pub{path}",
@@ -54,17 +113,13 @@ class VoxFacturaClient:
             )
         except httpx.HTTPError as e:
             raise VoxFacturaError(f"appel {path} échoué : {e}") from e
-        if r.status_code == 401:
-            raise VoxFacturaError("Clé API invalide ou révoquée.")
-        if r.status_code == 403:
-            raise VoxFacturaError("Cette clé n'a pas la permission requise pour cette donnée.")
         if r.status_code >= 400:
-            raise VoxFacturaError(f"{path} -> {r.status_code}: {r.text[:200]}")
+            raise self._erreur(path, r)
         return r.json()
 
     def _get_text(self, path: str, params: dict[str, Any] | None = None) -> str:
         """GET d'une réponse texte (export FEC)."""
-        clean = {k: v for k, v in (params or {}).items() if v is not None}
+        clean = self._params(params)
         try:
             r = httpx.get(
                 f"{self.base_url}/api/v1/pub{path}",
@@ -74,13 +129,34 @@ class VoxFacturaClient:
             )
         except httpx.HTTPError as e:
             raise VoxFacturaError(f"appel {path} échoué : {e}") from e
-        if r.status_code == 401:
-            raise VoxFacturaError("Clé API invalide ou révoquée.")
-        if r.status_code == 403:
-            raise VoxFacturaError("Cette clé n'a pas la permission requise pour cette donnée.")
         if r.status_code >= 400:
-            raise VoxFacturaError(f"{path} -> {r.status_code}: {r.text[:200]}")
+            raise self._erreur(path, r)
         return r.text
+
+    def _get_bytes(
+        self, path: str, params: dict[str, Any] | None = None
+    ) -> tuple[bytes, str, str | None]:
+        """GET d'un fichier (PDF, justificatif) : (octets, type MIME, nom)."""
+        clean = self._params(params)
+        try:
+            r = httpx.get(
+                f"{self.base_url}/api/v1/pub{path}",
+                params=clean,
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=_TIMEOUT,
+            )
+        except httpx.HTTPError as e:
+            raise VoxFacturaError(f"appel {path} échoué : {e}") from e
+        if r.status_code >= 400:
+            raise self._erreur(path, r)
+        mime = r.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+        disposition = r.headers.get("content-disposition", "")
+        nom = (
+            disposition.split('filename="', 1)[1].split('"', 1)[0]
+            if 'filename="' in disposition
+            else None
+        )
+        return r.content, mime, nom
 
     def _post(self, path: str, json_body: dict[str, Any]) -> Any:
         clean = {k: v for k, v in json_body.items() if v is not None}
@@ -88,20 +164,22 @@ class VoxFacturaClient:
             r = httpx.post(
                 f"{self.base_url}/api/v1/pub{path}",
                 json=clean,
+                # Clé cabinet : le dossier voyage aussi sur une écriture (403 net).
+                **({"params": {"dossier": self.dossier}} if self.dossier is not None else {}),
                 headers={"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"},
                 timeout=_TIMEOUT,
             )
         except httpx.HTTPError as e:
             raise VoxFacturaError(f"appel {path} échoué : {e}") from e
-        if r.status_code == 401:
-            raise VoxFacturaError("Clé API invalide ou révoquée.")
-        if r.status_code == 403:
-            raise VoxFacturaError("Cette clé n'a pas la permission d'écriture requise.")
         if r.status_code >= 400:
-            raise VoxFacturaError(f"{path} -> {r.status_code}: {r.text[:200]}")
+            raise self._erreur(path, r, ecriture=True)
         return r.json()
 
     # ── Lectures directes ─────────────────────────────────────────────────────
+    def list_dossiers(self) -> list[dict]:
+        """Clé cabinet : dossiers clients accessibles (num, raison_sociale, siren)."""
+        return self._get("/cabinet/dossiers")
+
     def list_invoices(
         self,
         *,
@@ -109,6 +187,8 @@ class VoxFacturaClient:
         statut: str | None = None,
         chantier_id: int | None = None,
         limit: int = 50,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ) -> list[dict]:
         page = self._get(
             "/invoices",
@@ -117,6 +197,8 @@ class VoxFacturaClient:
                 "statut": statut,
                 "chantier_id": chantier_id,
                 "limit": limit,
+                "from": date_from,
+                "to": date_to,
             },
         )
         return page.get("data", [])
@@ -125,12 +207,43 @@ class VoxFacturaClient:
         return self._get(f"/invoices/{invoice_id}")
 
     def list_expenses(
-        self, *, chantier_id: int | None = None, categorie: str | None = None, limit: int = 100
+        self,
+        *,
+        chantier_id: int | None = None,
+        categorie: str | None = None,
+        limit: int = 100,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ) -> list[dict]:
         page = self._get(
-            "/expenses", {"chantier_id": chantier_id, "categorie": categorie, "limit": limit}
+            "/expenses",
+            {
+                "chantier_id": chantier_id,
+                "categorie": categorie,
+                "limit": limit,
+                "from": date_from,
+                "to": date_to,
+            },
         )
         return page.get("data", [])
+
+    def invoice_pdf(self, invoice_id: int) -> tuple[bytes, str, str | None]:
+        """PDF Factur-X d'une facture émise."""
+        return self._get_bytes(f"/invoices/{invoice_id}/pdf")
+
+    def list_justificatifs(self, expense_id: int) -> list[dict]:
+        return self._get(f"/expenses/{expense_id}/justificatifs")
+
+    def get_justificatif(
+        self, expense_id: int, justificatif_id: str
+    ) -> tuple[bytes, str, str | None]:
+        return self._get_bytes(f"/expenses/{expense_id}/justificatifs/{justificatif_id}")
+
+    def list_payments(
+        self, *, date_from: str | None = None, date_to: str | None = None, limit: int = 100
+    ) -> dict:
+        """Page d'encaissements : `data`, `count`, `total`."""
+        return self._get("/payments", {"from": date_from, "to": date_to, "limit": limit})
 
     def list_chantiers(
         self, *, statut: str | None = None, client_id: int | None = None, limit: int = 50
@@ -160,6 +273,18 @@ class VoxFacturaClient:
     def purchase_journal(self, *, period_start: str, period_end: str) -> dict:
         return self._get(
             "/accounting/purchase-journal",
+            {"period_start": period_start, "period_end": period_end},
+        )
+
+    def sales_journal_csv(self, *, period_start: str, period_end: str) -> str:
+        return self._get_text(
+            "/accounting/sales-journal.csv",
+            {"period_start": period_start, "period_end": period_end},
+        )
+
+    def purchase_journal_csv(self, *, period_start: str, period_end: str) -> str:
+        return self._get_text(
+            "/accounting/purchase-journal.csv",
             {"period_start": period_start, "period_end": period_end},
         )
 
@@ -227,20 +352,26 @@ class VoxFacturaClient:
         )
 
     # ── Dérivés (calcul côté client) ──────────────────────────────────────────
+    def chantier_revenue(self, chantier_id: int) -> dict:
+        """CA facturé d'un chantier, calculé par le serveur (`invoices:read`) :
+        factures émises, avoirs déduits, acompte déjà facturé compté une fois."""
+        return self._get(f"/chantiers/{chantier_id}/revenue")
+
     def chantier_margin(self, chantier_id: int) -> dict:
-        """Marge d'un chantier : CA facturé (hors annulées) - dépenses. Combine
-        deux lectures (`invoices:read` + `expenses:read` requis sur la clé)."""
-        invoices = self.list_invoices(chantier_id=chantier_id, limit=200)
+        """Marge d'un chantier : CA facturé (calculé par le serveur, voir
+        `chantier_revenue`) - dépenses. Deux lectures (`invoices:read` +
+        `expenses:read` requis sur la clé)."""
+        ca = self.chantier_revenue(chantier_id)
         expenses = self.list_expenses(chantier_id=chantier_id, limit=200)
-        ca_ht = sum((_dec(f.get("total_ht")) for f in invoices), Decimal("0"))
-        ca_ttc = sum((_dec(f.get("total_ttc")) for f in invoices), Decimal("0"))
+        ca_ht = _dec(ca.get("ca_ht"))
+        ca_ttc = _dec(ca.get("ca_ttc"))
         dep_ht = sum((_dec(e.get("montant_ht")) for e in expenses), Decimal("0"))
         dep_ttc = sum((_dec(e.get("montant_ttc")) for e in expenses), Decimal("0"))
         marge_ht = ca_ht - dep_ht
         marge_pct = (marge_ht / ca_ht * 100) if ca_ht else Decimal("0")
         return {
             "chantier_id": chantier_id,
-            "nb_factures": len(invoices),
+            "nb_factures": int(ca.get("nb_factures") or 0),
             "nb_depenses": len(expenses),
             "ca_ht": str(ca_ht),
             "ca_ttc": str(ca_ttc),

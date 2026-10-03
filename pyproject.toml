@@ -1,6 +1,6 @@
 [project]
 name = "voxfactura-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Serveur MCP VoxFactura : branche ton business (factures, dépenses, chantiers, marge, TVA) sur ton assistant IA."
 readme = "README.md"
 requires-python = ">=3.10"

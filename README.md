@@ -61,15 +61,44 @@ claude mcp add voxfactura -e VOXFACTURA_API_KEY=vf_live_ta_cle -- voxfactura-mcp
 |---|---|---|
 | `VOXFACTURA_API_KEY` | Ta clé API (obligatoire) | aucune |
 | `VOXFACTURA_API_BASE_URL` | URL de l'API | `https://voxfacture-production.up.railway.app` |
+| `VOXFACTURA_DOSSIER` | Clé cabinet : numéro du dossier client lu par défaut | aucun |
+
+## Cabinet comptable : une clé pour tous vos dossiers
+
+Un cabinet d'expertise comptable crée une **clé cabinet** (`vf_cab_…`) depuis
+son espace cabinet VoxFactura, page **API**. Elle lit, en lecture seule, les
+dossiers des clients qui vous ont donné accès, un dossier à la fois :
+
+- l'outil `dossiers` liste vos dossiers (numéro, raison sociale, SIREN) ;
+- chaque outil accepte un paramètre `dossier` (numéro du dossier) ; à défaut,
+  le serveur prend `VOXFACTURA_DOSSIER` ;
+- les outils d'écriture répondent par un refus : une clé cabinet ne modifie rien ;
+- chaque lecture figure dans le journal que voit votre client, qui peut retirer
+  l'accès à tout moment.
+
+```json
+{
+  "mcpServers": {
+    "voxfactura-cabinet": {
+      "command": "voxfactura-mcp",
+      "env": { "VOXFACTURA_API_KEY": "vf_cab_votre_cle", "VOXFACTURA_DOSSIER": "1" }
+    }
+  }
+}
+```
 
 ## Outils
 
 | Outil | Rôle | Permission |
 |---|---|---|
+| `dossiers` | Dossiers clients d'une clé cabinet | clé cabinet |
 | `factures_impayees` | Factures impayées | factures |
-| `factures` | Factures (filtres statut / chantier) | factures |
+| `factures` | Factures (filtres statut / chantier / période) | factures |
 | `facture` | Détail d'une facture | factures |
-| `depenses` | Dépenses (filtres chantier / catégorie) | dépenses |
+| `pdf_facture` | PDF Factur-X d'une facture émise (base64) | factures |
+| `depenses` | Dépenses (filtres chantier / catégorie / période) | dépenses |
+| `justificatifs_depense` | Justificatifs d'une dépense | dépenses |
+| `justificatif` | Fichier d'un justificatif (base64) | dépenses |
 | `chantiers` | Liste des chantiers (filtres statut / client) | chantiers |
 | `chantier` | Détail d'un chantier | chantiers |
 | `clients` | Liste / recherche clients | clients |
@@ -77,10 +106,16 @@ claude mcp add voxfactura -e VOXFACTURA_API_KEY=vf_live_ta_cle -- voxfactura-mcp
 | `recap_tva` | TVA collectée / déductible / nette | comptabilité |
 | `journal_ventes` | Journal des ventes d'une période | comptabilité |
 | `journal_achats` | Journal des achats d'une période | comptabilité |
+| `journal_ventes_csv` | Journal des ventes en CSV | comptabilité |
+| `journal_achats_csv` | Journal des achats en CSV | comptabilité |
 | `export_fec` | Fichier des écritures comptables de l'année | comptabilité |
+| `encaissements` | Factures encaissées d'une période (date, montant, moyen) | payments:read |
 | `creer_devis_brouillon` | Crée un devis (brouillon) | devis:write |
 | `marquer_facture_payee` | Marque une facture payée | payments:write |
 | `ajouter_depense` | Ajoute une dépense | expenses:write |
+
+Tous les outils (sauf `dossiers`) acceptent aussi `dossier`, utile seulement
+avec une clé cabinet.
 
 ## API sous-jacente
 

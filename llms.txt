@@ -15,6 +15,21 @@
 - Doc OpenAPI : /api/v1/pub/openapi.json ; doc interactive : /api/v1/pub/docs
 - Toutes les données sont isolées au compte de la clé (aucun accès cross-compte).
 
+## Clé cabinet (cabinet d'expertise comptable)
+
+- Une clé `vf_cab_…` (créée dans l'espace cabinet, page API) lit les dossiers
+  des clients qui ont donné accès au cabinet, en LECTURE SEULE.
+- Chaque requête précise le dossier : paramètre `?dossier=<numéro>` ou en-tête
+  `X-VoxFactura-Dossier`. Sans dossier : 400. Dossier inconnu, pas à ce
+  cabinet ou accès retiré : 404. Toute écriture (POST) : 403.
+- GET /cabinet/dossiers (clé cabinet seulement) -> [ { num, raison_sociale,
+  siren } ] : les dossiers actifs.
+- Les mêmes routes de lecture que ci-dessous, avec `dossier` en plus. Les
+  numéros (`id`, `*_id`) sont ceux du dossier lu.
+- Frein : 600 requêtes par heure et par dossier, 6 000 par heure pour le
+  cabinet (429 avec Retry-After). Chaque lecture figure dans le journal du
+  client.
+
 ## Concepts
 
 - Chantier : un projet/affaire. Chaque facture et chaque dépense peut y être
@@ -36,26 +51,38 @@
 ## Permissions (scopes de la clé)
 
 - Lecture : invoices:read, expenses:read, chantiers:read, clients:read,
-  accounting:read
+  accounting:read, payments:read
 - Écriture : devis:write, payments:write, expenses:write
 - Une clé ne peut que ce que ses scopes autorisent (403 sinon).
 
 ## Endpoints lecture
 
-- GET /invoices?unpaid_only=&statut=&chantier_id=&limit=&offset=
-  -> { data: [factures], count, limit, offset }
+- GET /invoices?unpaid_only=&statut=&chantier_id=&from=&to=&limit=&offset=
+  -> { data: [factures], count, total, limit, offset } (`from` / `to` :
+  date d'émission AAAA-MM-JJ, incluses ; `count` = éléments de la page,
+  `total` = total correspondant aux filtres)
 - GET /invoices/{id} -> facture détaillée : lignes (avec leur `nature`, bien
   ou service), date de prestation, adresse de livraison, bon de commande,
   `nature_operations` (biens, services ou mixte)
-- GET /expenses?chantier_id=&categorie=&limit=&offset=
-- GET /chantiers?statut=&client_id=&limit=&offset= ; GET /chantiers/{id}
+- GET /invoices/{id}/pdf -> PDF Factur-X de la facture émise (404 pour un
+  brouillon)
+- GET /expenses?chantier_id=&categorie=&from=&to=&limit=&offset=
+- GET /expenses/{id}/justificatifs -> [ { id, nom, type, taille } ] ;
+  GET /expenses/{id}/justificatifs/{justificatif_id} -> le fichier
+- GET /payments?from=&to=&limit=&offset= (payments:read) -> factures
+  encaissées : invoice_id, numero, date, montant, moyen (carte, virement,
+  declare), statut
+- GET /chantiers?statut=&client_id=&limit=&offset= ; GET /chantiers/{id} ;
+  GET /chantiers/{id}/revenue (CA facturé du chantier, scope invoices:read)
 - GET /clients?search=&limit=&offset=
 
 ## Endpoints comptabilité (scope accounting:read)
 
 - GET /accounting/vat-summary?period_start=YYYY-MM-DD&period_end=YYYY-MM-DD
   -> TVA collectée par taux, déductible, TVA nette.
-- GET /accounting/sales-journal, /accounting/purchase-journal (mêmes dates)
+- GET /accounting/sales-journal, /accounting/purchase-journal (mêmes dates),
+  aussi en CSV : /accounting/sales-journal.csv, /accounting/purchase-journal.csv
+  (séparateur « ; », montants à virgule)
 - GET /accounting/fec?year=YYYY -> Fichier des Écritures Comptables (texte
   tab-séparé, partie double).
 
@@ -66,19 +93,52 @@
   date_validite?, delai_execution?, acompte_pct?, notes?, lignes: [ {
   designation, quantite, unite?, prix_unitaire_ht, taux_tva, prestation_id?,
   nature? ("bien" ou "service") } ] }. Sans validité : la durée du compte.
+  Ligne du catalogue sans prix_unitaire_ht : prix de ce client (réglé par
+  l'artisan ou dernier prix facturé), sinon celui du catalogue.
 - POST /invoices/{id}/mark-paid (payments:write) -> Body { montant? } (partiel
   si < total TTC ; vide = solde total).
 - POST /expenses (expenses:write) -> Body { designation, montant_ttc,
   montant_ht?, montant_tva?, chantier_id?, fournisseur?, categorie? }
 
+## Webhooks sortants
+
+L'artisan déclare une adresse https (port 443) dans son espace (page des
+clés API) et choisit les événements : invoice.issued, invoice.paid,
+expense.created. Un cabinet comptable déclare la sienne pour tous ses
+dossiers (le corps porte alors aussi `dossier`). Corps JSON { event, id,
+numero, date, montants, lien_api }. En-têtes :
+- `X-VoxFactura-Timestamp` : horodatage Unix (secondes) de l'envoi ;
+- `X-VoxFactura-Livraison` : identifiant unique de la livraison, identique à
+  chaque reprise (écarter les doublons avec) ;
+- `X-VoxFactura-Signature` : HMAC-SHA256 hexadécimal, avec le secret du
+  webhook (montré une fois à la création), de la chaîne
+  `t=<horodatage>.<corps reçu tel quel>` ;
+- `X-VoxFactura-Event` : l'événement.
+Vérification côté destinataire : refuser un horodatage à plus de 5 minutes
+de l'horloge locale, puis comparer la signature en temps constant :
+
+    import hashlib, hmac, time
+    def verifier(corps: bytes, entetes, secret: str) -> bool:
+        t = int(entetes["X-VoxFactura-Timestamp"])
+        if abs(time.time() - t) > 300:
+            return False
+        attendu = hmac.new(secret.encode(), f"t={t}.".encode() + corps,
+                           hashlib.sha256).hexdigest()
+        return hmac.compare_digest(attendu, entetes["X-VoxFactura-Signature"])
+
+Trois reprises en cas d'échec ; 20 échecs de suite coupent le webhook.
+
 ## Calculs utiles
 
-- Marge d'un chantier = somme des total_ht des factures du chantier − somme des
-  montant_ht des dépenses du chantier (croiser /invoices?chantier_id et
-  /expenses?chantier_id).
+- Marge d'un chantier = ca_ht de /chantiers/{id}/revenue (factures émises,
+  avoirs déduits, acompte compté une seule fois) − somme des montant_ht de
+  /expenses?chantier_id. Ne pas additionner /invoices : l'acompte y figure
+  aussi dans le total de la facture de solde.
 
 ## Bonnes pratiques
 
-- Paginer avec limit/offset jusqu'à recevoir moins de `limit` éléments.
+- Paginer avec limit/offset jusqu'à atteindre `total`.
 - Ne jamais supposer qu'une écriture envoie au client : l'envoi est manuel.
-- En cas de 401 : clé invalide/révoquée. En cas de 403 : scope manquant.
+- En cas de 401 : clé invalide/révoquée. En cas de 403 : scope manquant (ou
+  écriture avec une clé cabinet). Clé cabinet : 400 = dossier manquant,
+  404 = dossier introuvable ou accès retiré.
